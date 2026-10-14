@@ -1,5 +1,6 @@
 """Tests for the POST /api/chat endpoint in mock mode."""
 
+import json
 import os
 
 os.environ["LLM_MOCK"] = "true"
@@ -159,3 +160,149 @@ async def test_chat_trade_without_price_reports_error(client):
     portfolio = (await client.get("/api/portfolio")).json()
     assert portfolio["cash_balance"] == 10000.0
     assert portfolio["positions"] == []
+
+
+# ---------------------------------------------------------------------------
+# LLM response handling (fin-om1.3)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
+
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.choices = [_FakeChoice(content)]
+
+
+def _patch_llm(monkeypatch, content=None, exc=None):
+    """Stub litellm.acompletion, capturing the kwargs chat.py sends."""
+    from app import chat as chat_module
+
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        if exc is not None:
+            raise exc
+        return _FakeResponse(content)
+
+    monkeypatch.setattr(chat_module, "acompletion", fake_acompletion)
+    return captured
+
+
+async def test_llm_request_pins_cerebras_and_json_schema(client, monkeypatch):
+    """SPEC section 9: route to Cerebras and use a json_schema structured output."""
+    monkeypatch.setenv("LLM_MOCK", "false")
+    captured = _patch_llm(
+        monkeypatch,
+        content=json.dumps({"message": "Hi", "trades": None, "watchlist_changes": None}),
+    )
+
+    resp = await client.post("/api/chat", json={"message": "hello"})
+    assert resp.status_code == 200
+    assert resp.json()["message"] == "Hi"
+
+    assert captured["model"] == "openrouter/openai/gpt-oss-120b"
+    assert captured["extra_body"]["provider"] == {
+        "order": ["cerebras"],
+        "allow_fallbacks": False,
+    }
+
+    fmt = captured["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["strict"] is True
+    schema = fmt["json_schema"]["schema"]
+    assert set(schema["required"]) == {"message", "trades", "watchlist_changes"}
+    assert schema["properties"]["trades"]["items"]["properties"]["side"]["enum"] == [
+        "buy",
+        "sell",
+    ]
+
+
+async def test_llm_full_response_executes_actions(client, monkeypatch):
+    """A valid full response auto-executes its trades."""
+    monkeypatch.setenv("LLM_MOCK", "false")
+    _patch_llm(
+        monkeypatch,
+        content=json.dumps(
+            {
+                "message": "Buying 2 AAPL.",
+                "trades": [{"ticker": "AAPL", "side": "buy", "quantity": 2}],
+                "watchlist_changes": None,
+            }
+        ),
+    )
+
+    resp = await client.post("/api/chat", json={"message": "buy 2 aapl"})
+    assert resp.status_code == 200
+
+    portfolio = (await client.get("/api/portfolio")).json()
+    position = next(p for p in portfolio["positions"] if p["ticker"] == "AAPL")
+    assert position["quantity"] == 2
+    assert position["avg_cost"] == 150.0
+
+
+async def test_llm_message_only_response(client, monkeypatch):
+    """message-only is valid: no trades, no watchlist changes."""
+    monkeypatch.setenv("LLM_MOCK", "false")
+    _patch_llm(monkeypatch, content=json.dumps({"message": "Your P&L is flat."}))
+
+    resp = await client.post("/api/chat", json={"message": "how am i doing"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["message"] == "Your P&L is flat."
+    assert data["trades"] is None
+
+    assert (await client.get("/api/portfolio")).json()["positions"] == []
+
+
+async def test_llm_malformed_response_degrades_gracefully(client, monkeypatch):
+    """Non-JSON must not 500 — the prose is surfaced instead."""
+    monkeypatch.setenv("LLM_MOCK", "false")
+    _patch_llm(monkeypatch, content="I am not JSON at all.")
+
+    resp = await client.post("/api/chat", json={"message": "hello"})
+    assert resp.status_code == 200
+    assert resp.json()["message"] == "I am not JSON at all."
+
+
+async def test_llm_schema_violation_keeps_message_drops_actions(client, monkeypatch):
+    """Valid JSON with a bad trades shape keeps the text and executes nothing."""
+    monkeypatch.setenv("LLM_MOCK", "false")
+    _patch_llm(
+        monkeypatch,
+        content=json.dumps({"message": "Here you go.", "trades": "not-an-array"}),
+    )
+
+    resp = await client.post("/api/chat", json={"message": "buy stuff"})
+    assert resp.status_code == 200
+    assert resp.json()["message"] == "Here you go."
+    assert (await client.get("/api/portfolio")).json()["positions"] == []
+
+
+async def test_llm_transport_error_degrades_gracefully(client, monkeypatch):
+    """A provider/network failure becomes a chat message, not a 500."""
+    monkeypatch.setenv("LLM_MOCK", "false")
+    _patch_llm(monkeypatch, exc=RuntimeError("cerebras unavailable"))
+
+    resp = await client.post("/api/chat", json={"message": "hello"})
+    assert resp.status_code == 200
+    assert "could not reach the model" in resp.json()["message"]
+
+
+async def test_llm_mock_mode_makes_no_network_call(client, monkeypatch):
+    """LLM_MOCK=true must short-circuit before any provider call."""
+    monkeypatch.setenv("LLM_MOCK", "true")
+    _patch_llm(monkeypatch, exc=AssertionError("acompletion must not be called"))
+
+    resp = await client.post("/api/chat", json={"message": "hello"})
+    assert resp.status_code == 200
+    assert "FinAlly" in resp.json()["message"]

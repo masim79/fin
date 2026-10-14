@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from litellm import acompletion
 
@@ -254,19 +254,103 @@ async def _execute_watchlist_change(db, ticker: str, action: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-async def _call_llm(messages: list[dict]) -> ChatResponse:
-    """Call LLM via LiteLLM -> OpenRouter and parse structured response."""
-    response = await acompletion(
-        model="openrouter/openai/gpt-oss-120b",
-        messages=messages,
-        extra_body={
-            "response_format": {"type": "json_object"},
-        },
-    )
+MODEL = "openrouter/openai/gpt-oss-120b"
 
-    content = response.choices[0].message.content
-    parsed = json.loads(content)
-    return ChatResponse(**parsed)
+# Pin inference to Cerebras (SPEC section 9). allow_fallbacks=False means we
+# fail loudly rather than silently getting served by a slower provider — the
+# no-token-streaming UX depends on Cerebras-speed inference.
+PROVIDER_PREFERENCES = {"order": ["cerebras"], "allow_fallbacks": False}
+
+# Structured output schema mirroring SPEC section 9. `strict` requires every
+# property to be listed in `required`, so the optional arrays are nullable
+# rather than absent.
+RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "finally_reply",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Conversational response shown to the user",
+                },
+                "trades": {
+                    "type": ["array", "null"],
+                    "description": "Trades to auto-execute, or null for none",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string"},
+                            "side": {"type": "string", "enum": ["buy", "sell"]},
+                            "quantity": {"type": "number"},
+                        },
+                        "required": ["ticker", "side", "quantity"],
+                        "additionalProperties": False,
+                    },
+                },
+                "watchlist_changes": {
+                    "type": ["array", "null"],
+                    "description": "Watchlist edits to apply, or null for none",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ticker": {"type": "string"},
+                            "action": {"type": "string", "enum": ["add", "remove"]},
+                        },
+                        "required": ["ticker", "action"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["message", "trades", "watchlist_changes"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def _call_llm(messages: list[dict]) -> ChatResponse:
+    """Call the LLM via LiteLLM -> OpenRouter (Cerebras) and parse the reply.
+
+    Never raises on a bad reply: a malformed or schema-violating response is
+    turned into a conversational error so the chat stays usable (SPEC s12).
+    """
+    try:
+        response = await acompletion(
+            model=MODEL,
+            messages=messages,
+            response_format=RESPONSE_SCHEMA,
+            extra_body={"provider": PROVIDER_PREFERENCES},
+        )
+    except Exception as exc:  # network error, provider unavailable, auth, ...
+        return ChatResponse(
+            message=f"I could not reach the model just now ({exc}). Please try again."
+        )
+
+    content = (response.choices[0].message.content or "").strip()
+
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        # Not JSON at all — surface whatever prose came back rather than 500.
+        return ChatResponse(
+            message=content or "I received an empty response. Please try again."
+        )
+
+    if not isinstance(parsed, dict):
+        return ChatResponse(message="I received an unexpected response. Please try again.")
+
+    try:
+        return ChatResponse.model_validate(parsed)
+    except ValidationError:
+        # Valid JSON, wrong shape. Keep the message if there is one and drop
+        # the malformed actions rather than executing something half-parsed.
+        message = parsed.get("message")
+        if isinstance(message, str) and message:
+            return ChatResponse(message=message)
+        return ChatResponse(message="I received a malformed response. Please try again.")
 
 
 # ---------------------------------------------------------------------------
