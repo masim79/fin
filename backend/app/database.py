@@ -96,3 +96,15 @@ async def init_db():
             await db.commit()
     finally:
         await db.close()
+
+
+async def load_watchlist_tickers() -> list[str]:
+    """Return every ticker on the watchlist, for seeding the market provider."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT ticker FROM watchlist WHERE user_id = 'default' ORDER BY added_at"
+        )
+        return [row["ticker"] for row in await cursor.fetchall()]
+    finally:
+        await db.close()

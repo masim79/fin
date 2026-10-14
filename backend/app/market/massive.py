@@ -20,10 +20,23 @@ class MassiveClient(MarketDataProvider):
 
     def __init__(self, tickers: list[str]):
         self._api_key = os.environ["MASSIVE_API_KEY"]
-        self._tickers = tickers
+        # Ordered-unique set of symbols to poll; grows as the watchlist does.
+        self._tickers = list(dict.fromkeys(t.upper().strip() for t in tickers))
         self._poll_interval = float(os.environ.get("MASSIVE_POLL_INTERVAL", DEFAULT_POLL_INTERVAL))
         self._task: asyncio.Task | None = None
         self._client: httpx.AsyncClient | None = None
+
+    def add_ticker(self, ticker: str) -> None:
+        """Include `ticker` in the polled set from the next poll onward."""
+        ticker = ticker.upper().strip()
+        if ticker and ticker not in self._tickers:
+            self._tickers.append(ticker)
+
+    def remove_ticker(self, ticker: str) -> None:
+        """Drop `ticker` from the polled set."""
+        ticker = ticker.upper().strip()
+        if ticker in self._tickers:
+            self._tickers.remove(ticker)
 
     async def start(self) -> None:
         self._client = httpx.AsyncClient(timeout=10.0)
@@ -47,6 +60,9 @@ class MassiveClient(MarketDataProvider):
 
     async def _poll(self) -> None:
         """Fetch latest prices for all tickers from Polygon.io snapshot endpoint."""
+        if not self._tickers:
+            return
+
         tickers_csv = ",".join(self._tickers)
         url = f"{POLYGON_BASE_URL}/v2/snapshot/locale/us/markets/stocks/tickers"
         params = {"tickers": tickers_csv, "apiKey": self._api_key}

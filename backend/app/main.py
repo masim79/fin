@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.chat import router as chat_router
-from app.database import init_db
+from app.database import init_db, load_watchlist_tickers
 from app.market.provider import create_provider
 from app.market.stream import router as stream_router
 from app.portfolio import router as portfolio_router
@@ -22,6 +22,12 @@ async def lifespan(app: FastAPI):
     """Initialize database, start market data provider and snapshot recorder."""
     await init_db()
     provider = create_provider()
+
+    # Price every ticker already on the watchlist, not just the seeded
+    # defaults, so tickers the user added in an earlier run still stream.
+    for ticker in await load_watchlist_tickers():
+        provider.add_ticker(ticker)
+
     await provider.start()
     start_snapshot_recorder()
     yield
