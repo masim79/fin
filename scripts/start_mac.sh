@@ -7,6 +7,15 @@ PORT=8000
 
 cd "$(dirname "$0")/.."
 
+# .env is gitignored, so a clean checkout has none and `docker run --env-file`
+# would abort before the container ever starts. Seed it from the example and
+# let the app run on the simulator until a real key is filled in.
+if [[ ! -f .env ]]; then
+    echo "No .env found — creating one from .env.example."
+    cp .env.example .env
+    echo "Add your OPENROUTER_API_KEY to .env to enable AI chat."
+fi
+
 # Build if image doesn't exist or --build flag passed
 if [[ "${1:-}" == "--build" ]] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     echo "Building image..."

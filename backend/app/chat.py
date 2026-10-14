@@ -1,6 +1,7 @@
 """POST /api/chat — LLM chat with auto-execution of trades and watchlist changes."""
 
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from litellm import acompletion
 
 from app.database import get_db
 from app.portfolio import TradeError, perform_trade
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -324,9 +327,12 @@ async def _call_llm(messages: list[dict]) -> ChatResponse:
             response_format=RESPONSE_SCHEMA,
             extra_body={"provider": PROVIDER_PREFERENCES},
         )
-    except Exception as exc:  # network error, provider unavailable, auth, ...
+    except Exception:  # network error, provider unavailable, auth, ...
+        # Log the detail for operators; don't leak provider internals (or any
+        # part of a key) into a message rendered in the user's chat panel.
+        logger.exception("LLM call failed")
         return ChatResponse(
-            message=f"I could not reach the model just now ({exc}). Please try again."
+            message="I could not reach the model just now. Please try again in a moment."
         )
 
     content = (response.choices[0].message.content or "").strip()

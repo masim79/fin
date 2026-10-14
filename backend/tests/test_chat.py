@@ -295,7 +295,10 @@ async def test_llm_transport_error_degrades_gracefully(client, monkeypatch):
 
     resp = await client.post("/api/chat", json={"message": "hello"})
     assert resp.status_code == 200
-    assert "could not reach the model" in resp.json()["message"]
+    message = resp.json()["message"]
+    assert "could not reach the model" in message
+    # The raw provider exception must not reach the user's chat panel
+    assert "cerebras unavailable" not in message
 
 
 async def test_llm_mock_mode_makes_no_network_call(client, monkeypatch):
