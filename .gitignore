@@ -23,3 +23,6 @@ out/
 .pytest_cache/
 test-results/
 playwright-report/
+
+# Local static export (produced by frontend build, copied in by Docker)
+static/
