@@ -118,121 +118,132 @@ async def get_portfolio():
         await db.close()
 
 
-@router.post("/trade", response_model=TradeResponse)
-async def execute_trade(body: TradeRequest):
-    """Execute a market order at current cached price."""
-    ticker = body.ticker.upper().strip()
-    quantity = body.quantity
-    side = body.side.lower()
+class TradeError(Exception):
+    """A trade failed validation (bad side/quantity, no price, or insufficient funds/shares)."""
+
+
+async def perform_trade(db, ticker: str, side: str, quantity: float) -> dict:
+    """Execute a market order at the current cached price on an open connection.
+
+    Shared by the REST route and the LLM chat auto-executor so both fill at the
+    same live price and run the same validation. Raises TradeError on any
+    validation failure. The caller owns commit().
+    """
+    ticker = ticker.upper().strip()
+    side = side.lower().strip()
 
     if side not in ("buy", "sell"):
-        raise HTTPException(status_code=400, detail="side must be 'buy' or 'sell'")
+        raise TradeError("side must be 'buy' or 'sell'")
     if quantity <= 0:
-        raise HTTPException(status_code=400, detail="quantity must be positive")
+        raise TradeError("quantity must be positive")
 
     update = price_cache.get(ticker)
     if update is None:
-        raise HTTPException(status_code=400, detail=f"No price available for {ticker}")
+        raise TradeError(f"No price available for {ticker}")
     current_price = update.price
 
+    cursor = await db.execute(
+        "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+    )
+    user = await cursor.fetchone()
+    cash = user["cash_balance"]
+
+    now = datetime.now(timezone.utc).isoformat()
+    trade_id = str(uuid.uuid4())
+
+    if side == "buy":
+        total_cost = quantity * current_price
+        if cash < total_cost:
+            raise TradeError(
+                f"Insufficient cash: need ${total_cost:.2f}, have ${cash:.2f}"
+            )
+
+        cursor = await db.execute(
+            "SELECT quantity, avg_cost FROM positions WHERE user_id = 'default' AND ticker = ?",
+            (ticker,),
+        )
+        existing = await cursor.fetchone()
+        if existing:
+            old_qty = existing["quantity"]
+            old_avg = existing["avg_cost"]
+            new_qty = old_qty + quantity
+            new_avg = ((old_qty * old_avg) + (quantity * current_price)) / new_qty
+            await db.execute(
+                "UPDATE positions SET quantity = ?, avg_cost = ?, updated_at = ? WHERE user_id = 'default' AND ticker = ?",
+                (new_qty, new_avg, now, ticker),
+            )
+        else:
+            await db.execute(
+                "INSERT INTO positions (id, user_id, ticker, quantity, avg_cost, updated_at) VALUES (?, 'default', ?, ?, ?, ?)",
+                (str(uuid.uuid4()), ticker, quantity, current_price, now),
+            )
+
+        await db.execute(
+            "UPDATE users_profile SET cash_balance = cash_balance - ? WHERE id = 'default'",
+            (total_cost,),
+        )
+
+    else:  # sell
+        cursor = await db.execute(
+            "SELECT quantity FROM positions WHERE user_id = 'default' AND ticker = ?",
+            (ticker,),
+        )
+        existing = await cursor.fetchone()
+        if not existing or existing["quantity"] < quantity:
+            held = existing["quantity"] if existing else 0
+            raise TradeError(
+                f"Insufficient shares: want to sell {quantity}, hold {held}"
+            )
+
+        new_qty = existing["quantity"] - quantity
+        if new_qty == 0:
+            await db.execute(
+                "DELETE FROM positions WHERE user_id = 'default' AND ticker = ?",
+                (ticker,),
+            )
+        else:
+            await db.execute(
+                "UPDATE positions SET quantity = ?, updated_at = ? WHERE user_id = 'default' AND ticker = ?",
+                (new_qty, now, ticker),
+            )
+
+        proceeds = quantity * current_price
+        await db.execute(
+            "UPDATE users_profile SET cash_balance = cash_balance + ? WHERE id = 'default'",
+            (proceeds,),
+        )
+
+    await db.execute(
+        "INSERT INTO trades (id, user_id, ticker, side, quantity, price, executed_at) VALUES (?, 'default', ?, ?, ?, ?, ?)",
+        (trade_id, ticker, side, quantity, current_price, now),
+    )
+
+    await take_snapshot(db)
+
+    return {
+        "id": trade_id,
+        "ticker": ticker,
+        "side": side,
+        "quantity": quantity,
+        "price": current_price,
+        "executed_at": now,
+    }
+
+
+@router.post("/trade", response_model=TradeResponse)
+async def execute_trade(body: TradeRequest):
+    """Execute a market order at the current cached price."""
     db = await get_db()
     try:
-        cursor = await db.execute(
-            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
-        )
-        user = await cursor.fetchone()
-        cash = user["cash_balance"]
-
-        now = datetime.now(timezone.utc).isoformat()
-        trade_id = str(uuid.uuid4())
-
-        if side == "buy":
-            total_cost = quantity * current_price
-            if cash < total_cost:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Insufficient cash: need ${total_cost:.2f}, have ${cash:.2f}",
-                )
-
-            # Update or create position
-            cursor = await db.execute(
-                "SELECT quantity, avg_cost FROM positions WHERE user_id = 'default' AND ticker = ?",
-                (ticker,),
-            )
-            existing = await cursor.fetchone()
-            if existing:
-                old_qty = existing["quantity"]
-                old_avg = existing["avg_cost"]
-                new_qty = old_qty + quantity
-                new_avg = ((old_qty * old_avg) + (quantity * current_price)) / new_qty
-                await db.execute(
-                    "UPDATE positions SET quantity = ?, avg_cost = ?, updated_at = ? WHERE user_id = 'default' AND ticker = ?",
-                    (new_qty, new_avg, now, ticker),
-                )
-            else:
-                await db.execute(
-                    "INSERT INTO positions (id, user_id, ticker, quantity, avg_cost, updated_at) VALUES (?, 'default', ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), ticker, quantity, current_price, now),
-                )
-
-            # Deduct cash
-            await db.execute(
-                "UPDATE users_profile SET cash_balance = cash_balance - ? WHERE id = 'default'",
-                (total_cost,),
-            )
-
-        else:  # sell
-            cursor = await db.execute(
-                "SELECT quantity FROM positions WHERE user_id = 'default' AND ticker = ?",
-                (ticker,),
-            )
-            existing = await cursor.fetchone()
-            if not existing or existing["quantity"] < quantity:
-                held = existing["quantity"] if existing else 0
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Insufficient shares: want to sell {quantity}, hold {held}",
-                )
-
-            new_qty = existing["quantity"] - quantity
-            if new_qty == 0:
-                await db.execute(
-                    "DELETE FROM positions WHERE user_id = 'default' AND ticker = ?",
-                    (ticker,),
-                )
-            else:
-                await db.execute(
-                    "UPDATE positions SET quantity = ?, updated_at = ? WHERE user_id = 'default' AND ticker = ?",
-                    (new_qty, now, ticker),
-                )
-
-            # Add proceeds to cash
-            proceeds = quantity * current_price
-            await db.execute(
-                "UPDATE users_profile SET cash_balance = cash_balance + ? WHERE id = 'default'",
-                (proceeds,),
-            )
-
-        # Log the trade
-        await db.execute(
-            "INSERT INTO trades (id, user_id, ticker, side, quantity, price, executed_at) VALUES (?, 'default', ?, ?, ?, ?, ?)",
-            (trade_id, ticker, side, quantity, current_price, now),
-        )
-
-        # Take post-trade snapshot
-        await take_snapshot(db)
-
+        try:
+            result = await perform_trade(db, body.ticker, body.side, body.quantity)
+        except TradeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         await db.commit()
-        return TradeResponse(
-            id=trade_id,
-            ticker=ticker,
-            side=side,
-            quantity=quantity,
-            price=current_price,
-            executed_at=now,
-        )
+        return TradeResponse(**result)
     finally:
         await db.close()
+
 
 
 @router.get("/history", response_model=list[SnapshotResponse])
