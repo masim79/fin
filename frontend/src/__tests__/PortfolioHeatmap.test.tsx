@@ -4,14 +4,19 @@ import PortfolioHeatmap from "@/components/PortfolioHeatmap";
 import type { Position } from "@/lib/api";
 
 function position(overrides: Partial<Position> & { ticker: string }): Position {
+  const quantity = overrides.quantity ?? 10;
+  const avgCost = overrides.avg_cost ?? 100;
+  const currentPrice = overrides.current_price ?? 100;
+
   return {
     ticker: overrides.ticker,
-    quantity: overrides.quantity ?? 10,
-    avg_cost: overrides.avg_cost ?? 100,
-    current_price: overrides.current_price ?? 100,
-    unrealized_pnl: overrides.unrealized_pnl ?? 0,
-    pnl_pct: overrides.pnl_pct ?? 0,
-  } as Position;
+    quantity,
+    avg_cost: avgCost,
+    current_price: currentPrice,
+    unrealized_pnl: overrides.unrealized_pnl ?? (currentPrice - avgCost) * quantity,
+    pnl_percent:
+      overrides.pnl_percent ?? (avgCost > 0 ? ((currentPrice - avgCost) / avgCost) * 100 : 0),
+  };
 }
 
 const tile = (ticker: string) => screen.getByTestId(`heatmap-tile-${ticker}`);
