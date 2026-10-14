@@ -3,10 +3,19 @@
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import aiosqlite
 
-DB_PATH = os.environ.get("DB_PATH", "db/finally.db")
+# Resolve the default relative to this file, NOT the process working directory.
+# In the container the app runs from /app/backend, so a plain "db/finally.db"
+# landed in /app/backend/db — inside the image, not the volume mounted at
+# /app/db — and every restart silently reset the portfolio (SPEC section 11).
+# backend/app/database.py -> backend/app -> backend -> project root
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_DB_PATH = _PROJECT_ROOT / "db" / "finally.db"
+
+DB_PATH = os.environ.get("DB_PATH") or str(_DEFAULT_DB_PATH)
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS users_profile (

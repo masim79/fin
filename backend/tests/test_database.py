@@ -1,5 +1,7 @@
 """Tests for database initialization and schema."""
 
+import os
+
 import pytest
 import aiosqlite
 
@@ -118,3 +120,83 @@ async def test_trades_table_accepts_buy_and_sell(db):
         assert row[0] == 2
     finally:
         await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# DB file location (fin-om1.2)
+# ---------------------------------------------------------------------------
+
+
+def test_default_db_path_is_project_root_db_dir():
+    """The default must sit in <project root>/db, which is the Docker volume
+    mount target (/app/db), and must NOT depend on the working directory."""
+    import app.database as database
+
+    expected = database._PROJECT_ROOT / "db" / "finally.db"
+    assert database._DEFAULT_DB_PATH == expected
+    # backend/app/database.py -> project root holds backend/ and db/
+    assert (database._PROJECT_ROOT / "backend").is_dir()
+
+
+def test_default_db_path_is_absolute_and_cwd_independent(tmp_path, monkeypatch):
+    """Regression: a relative default resolved against /app/backend in the
+    container, writing outside the mounted volume."""
+    import app.database as database
+
+    assert os.path.isabs(str(database._DEFAULT_DB_PATH))
+
+    monkeypatch.chdir(tmp_path)
+    from pathlib import Path
+
+    recomputed = Path(database.__file__).resolve().parent.parent.parent / "db" / "finally.db"
+    assert recomputed == database._DEFAULT_DB_PATH
+
+
+def test_db_path_env_var_overrides_default(monkeypatch):
+    """The Dockerfile sets DB_PATH=/app/db/finally.db explicitly."""
+    import importlib
+
+    monkeypatch.setenv("DB_PATH", "/tmp/custom/finally.db")
+    import app.database as database
+
+    reloaded = importlib.reload(database)
+    try:
+        assert reloaded.DB_PATH == "/tmp/custom/finally.db"
+    finally:
+        monkeypatch.delenv("DB_PATH", raising=False)
+        importlib.reload(database)
+
+
+@pytest.mark.asyncio
+async def test_data_survives_reopening_the_same_file(tmp_path):
+    """Stand-in for a container restart: state must persist in the DB file."""
+    import importlib
+
+    import app.database as database
+
+    db_file = str(tmp_path / "persist.db")
+    original = database.DB_PATH
+    database.DB_PATH = db_file
+    try:
+        await database.init_db()
+
+        db = await database.get_db()
+        await db.execute(
+            "UPDATE users_profile SET cash_balance = 4242.0 WHERE id = 'default'"
+        )
+        await db.commit()
+        await db.close()
+
+        # Re-run lazy init exactly as a fresh process would
+        await database.init_db()
+        db = await database.get_db()
+        cursor = await db.execute(
+            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        )
+        row = await cursor.fetchone()
+        await db.close()
+
+        assert row["cash_balance"] == 4242.0
+    finally:
+        database.DB_PATH = original
+        importlib.reload(database)

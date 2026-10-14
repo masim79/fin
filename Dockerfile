@@ -22,6 +22,11 @@ COPY --from=frontend-build /build/out/ static/
 
 EXPOSE 8000
 
+# The SQLite file must live on the volume mounted at /app/db so the portfolio
+# survives container restarts (SPEC section 11).
+ENV DB_PATH=/app/db/finally.db
+VOLUME ["/app/db"]
+
 WORKDIR /app/backend
 
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
