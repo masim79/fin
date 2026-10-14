@@ -13,6 +13,7 @@ from app.database import init_db, load_watchlist_tickers
 from app.market.provider import create_provider
 from app.market.stream import router as stream_router
 from app.portfolio import router as portfolio_router
+from app import testsupport
 from app.watchlist import router as watchlist_router
 from app.snapshots import start_snapshot_recorder, stop_snapshot_recorder
 
@@ -41,6 +42,11 @@ app.include_router(chat_router)
 app.include_router(stream_router)
 app.include_router(portfolio_router)
 app.include_router(watchlist_router)
+
+
+# Test-support routes, present only when E2E_TEST_MODE=true (see testsupport).
+if testsupport.enabled():
+    app.include_router(testsupport.router)
 
 
 @app.get("/api/health")

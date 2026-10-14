@@ -38,7 +38,11 @@ export default function PositionsTable({ positions, prices }: PositionsTableProp
             const color = pnl >= 0 ? "text-green" : "text-red";
 
             return (
-              <tr key={pos.ticker} className="border-t border-border">
+              <tr
+                key={pos.ticker}
+                data-testid={`position-row-${pos.ticker}`}
+                className="border-t border-border"
+              >
                 <td className="py-1 pr-2 font-semibold text-accent-yellow">{pos.ticker}</td>
                 <td className="py-1 pr-2 text-right">{pos.quantity}</td>
                 <td className="py-1 pr-2 text-right">${pos.avg_cost.toFixed(2)}</td>

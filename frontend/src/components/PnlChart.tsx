@@ -48,7 +48,12 @@ export default function PnlChart() {
   const padding = (max - min) * 0.1 || 100;
 
   return (
-    <ResponsiveContainer width="100%" height="100%">
+    <div
+      className="h-full w-full"
+      data-testid="pnl-chart"
+      data-point-count={chartData.length}
+    >
+      <ResponsiveContainer width="100%" height="100%">
       <LineChart data={chartData} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
         <XAxis dataKey="time" tick={{ fontSize: 9, fill: "#8b949e" }} tickLine={false} axisLine={false} />
         <YAxis
@@ -72,7 +77,8 @@ export default function PnlChart() {
           dot={false}
           isAnimationActive={false}
         />
-      </LineChart>
-    </ResponsiveContainer>
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
   );
 }

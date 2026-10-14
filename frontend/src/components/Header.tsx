@@ -27,13 +27,13 @@ export default function Header({
       <div className="flex items-center gap-6 text-sm">
         <div>
           <span className="text-text-secondary">Portfolio </span>
-          <span className="font-bold text-accent-blue">
+          <span className="font-bold text-accent-blue" data-testid="portfolio-value">
             ${totalValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </span>
         </div>
         <div>
           <span className="text-text-secondary">Cash </span>
-          <span className="font-bold">
+          <span className="font-bold" data-testid="cash-balance">
             ${cashBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </span>
         </div>
@@ -41,7 +41,9 @@ export default function Header({
           <div
             className={`h-2.5 w-2.5 rounded-full ${statusColors[connectionStatus]}`}
           />
-          <span className="text-text-secondary text-xs">{connectionStatus}</span>
+          <span className="text-text-secondary text-xs" data-testid="connection-status">
+            {connectionStatus}
+          </span>
         </div>
       </div>
     </header>
